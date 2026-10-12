@@ -1,12 +1,1 @@
-
-{
-  "name": "NutriIA - Nutrición inteligente",
-  "short_name": "NutriIA",
-  "description": "Tu nutrición, a tu ritmo",
-  "lang": "es",
-  "start_url": "./",
-  "scope": "./",
-  "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#effaf2"
-}
+{"id":"./","name":"NutriIA · Nutrición y progreso","short_name":"NutriIA","description":"Diario nutricional y actividad. Datos locales en tu dispositivo.","start_url":"./","scope":"./","display":"standalone","background_color":"#ffffff","theme_color":"#effaf2","lang":"es","icons":[{"src":"./assets/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},{"src":"./assets/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]}
