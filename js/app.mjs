@@ -1,6 +1,6 @@
-import {MEALS,KEYS,MICRO_KEYS,LABELS,NUTRIENT_UNITS,todayISO,shiftDate,uid,parseNumber,allowedUnits,scaleNutrition,sumNutrition,totalsForEntries,recipeNutrition,nutritionPerServingFood,createEntry,createState,dayMeals,ensureDay,duplicateEntryFound,createSavedMeal,applySavedMeal,approximateMaintenance,safeText,validateFood,fmt} from './core.mjs';
-import {SAMPLE_FOODS,SAMPLE_RECIPES} from './seed.mjs';
-import {readState,writeState,backupBlob,wipeState,migrate} from './store.mjs';
+import {MEALS,KEYS,MICRO_KEYS,LABELS,NUTRIENT_UNITS,todayISO,shiftDate,uid,parseNumber,allowedUnits,scaleNutrition,sumNutrition,totalsForEntries,recipeNutrition,nutritionPerServingFood,createEntry,createState,dayMeals,ensureDay,duplicateEntryFound,createSavedMeal,applySavedMeal,approximateMaintenance,safeText,validateFood,fmt} from './core.mjs?v=20261012-redesign2';
+import {SAMPLE_FOODS,SAMPLE_RECIPES} from './seed.mjs?v=20261012-redesign2';
+import {readState,writeState,backupBlob,wipeState,migrate} from './store.mjs?v=20261012-redesign2';
 const $=s=>document.querySelector(s), esc=safeText;
 let state, storageProblem='';
 try{state=readState();}catch(e){storageProblem=`No se pudo leer el almacenamiento local: ${e.message}. No se guardarán cambios hasta solucionar el problema.`;state=createState();}
