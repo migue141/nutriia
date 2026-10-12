@@ -1,635 +1,245 @@
-
-import {
-  createState, MEALS, KEYS, nutritionFor,
-  sumNutrition, estimateEnergy, calculateMacros
-} from './core.mjs';
-
-import {
-  readState, writeState, backupBlob, wipeState
-} from './store.mjs';
-
-import {SAMPLE_FOODS, SAMPLE_RECIPES} from './seed.mjs';
-
-const app = document.querySelector('#app');
-const tabs = ['Diario','Alimentos','Recetas','Actividad','Perfil','Datos'];
-const today = new Date();
-const iso = d => [
-  d.getFullYear(),
-  String(d.getMonth()+1).padStart(2,'0'),
-  String(d.getDate()).padStart(2,'0')
-].join('-');
-
-let date = iso(today);
-let tab = 'Diario';
-let state, loadError = null;
-
-try {
-  state = readState();
-} catch (error) {
-  loadError = error.message;
-  state = createState();
+import {MEALS,KEYS,MICRO_KEYS,LABELS,NUTRIENT_UNITS,todayISO,shiftDate,uid,parseNumber,allowedUnits,scaleNutrition,sumNutrition,totalsForEntries,recipeNutrition,nutritionPerServingFood,createEntry,createState,dayMeals,ensureDay,duplicateEntryFound,createSavedMeal,applySavedMeal,approximateMaintenance,safeText,validateFood,fmt} from './core.mjs';
+import {SAMPLE_FOODS,SAMPLE_RECIPES} from './seed.mjs';
+import {readState,writeState,backupBlob,wipeState,migrate} from './store.mjs';
+const $=s=>document.querySelector(s), esc=safeText;
+let state, storageProblem='';
+try{state=readState();}catch(e){storageProblem=`No se pudo leer el almacenamiento local: ${e.message}. No se guardarán cambios hasta solucionar el problema.`;state=createState();}
+const ui={page:'inicio',date:todayISO(),foodSearch:'',recipeSearch:'',recipeFilter:'todas',foodFilter:'todos',notice:'',error:'',modal:null,recipeDraft:null,analysis:[],analysisUnknown:[],photoURL:null};
+const navIcon=path=>`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${path}"></path></svg>`;
+const pages=[
+ ['inicio',navIcon('M3 10.8 12 3l9 7.8v9.7a.5.5 0 0 1-.5.5h-5.8v-6.4H9.3V21H3.5a.5.5 0 0 1-.5-.5z'),'Inicio'],
+ ['diario',navIcon('M5 3.5h11a3 3 0 0 1 3 3V21H7.5A2.5 2.5 0 0 1 5 18.5zm0 0v15M8.5 8H16M8.5 12H16'),'Diario'],
+ ['alimentos',navIcon('M7 3v7a3 3 0 0 0 3 3V3m-3 4h3m0 6v8m7-18v18m0-18c-2 2-3 4.5-3 7.5V13h3'),'Alimentos'],
+ ['recetas',navIcon('M6 10.5C6 6.4 8.6 3 12 3s6 3.4 6 7.5M4 11h16l-1 9H5zM9 7.5h6'),'Recetas'],
+ ['actividad',navIcon('M13 4.5a2 2 0 1 0 0-4 2 2 0 0 0 0 4M8 21l2-7 2 2 1 5m-3-7 2-5 3 2 3 1M12 9 9 7l-3 4'),'Actividad'],
+ ['perfil',navIcon('M12 21s7-4.6 7-11A7 7 0 1 0 5 10c0 6.4 7 11 7 11m0-7.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7'),'Objetivos'],
+ ['datos',navIcon('M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7m7.4-2.2 1.6 1.2-2 3.5-1.9-.8a8 8 0 0 1-2 1.2L14.8 21h-4l-.3-2.1a8 8 0 0 1-2-1.2l-1.9.8-2-3.5 1.6-1.2a8 8 0 0 1 0-2.5L4.6 10l2-3.5 1.9.8a8 8 0 0 1 2-1.2l.3-2.1h4l.3 2.1a8 8 0 0 1 2 1.2l1.9-.8 2 3.5-1.6 1.2a8 8 0 0 1 0 2.1'),'Mis datos']
+];
+const foods=()=>[...state.customFoods,...SAMPLE_FOODS];
+const recipes=()=>[...state.customRecipes,...SAMPLE_RECIPES];
+const findFood=id=>foods().find(f=>f.id===id);
+const findRecipe=id=>recipes().find(r=>r.id===id);
+const byDate=(a,b)=>b.date.localeCompare(a.date);
+const readableDate=iso=>new Date(iso+'T12:00:00').toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'long',year:'numeric'});
+const nutrient=(n,k)=>n?.[k]==null||!Number.isFinite(n[k])?'Desconocido':`${fmt(n[k],k==='kcal'?0:1)} ${NUTRIENT_UNITS[k]}`;
+const totals=(sum,k)=>!sum?.[k]?'—':(sum[k].missing&&sum[k].known===0)?'Desconocido':`${fmt(sum[k].value,k==='kcal'?0:1)} ${NUTRIENT_UNITS[k]}${sum[k].missing?' · parcial':''}`;
+const macroTiles=(sum)=>`<div class="stat-row">${['kcal','protein','carbs','fat'].map(k=>`<div class="stat"><small>${LABELS[k]}</small><strong>${totals(sum,k)}</strong></div>`).join('')}</div>`;
+function dailyTargets(){const maintenance=approximateMaintenance(state.profile);if(!maintenance)return null;const factor={mantener:1,perder:.9,ganar:1.1}[state.profile.goal]??1,kcal=Math.round(maintenance*factor);return {kcal,protein:kcal*Number(state.profile.macroProtein??25)/400,carbs:kcal*Number(state.profile.macroCarbs??45)/400,fat:kcal*Number(state.profile.macroFat??30)/900};}
+function macroDashboard(sum){const target=dailyTargets(),value=k=>Number.isFinite(sum?.[k]?.value)?sum[k].value:0,pct=(v,t)=>t?Math.max(0,Math.min(100,Math.round(v/t*100))):0,used=value('kcal'),energyPct=pct(used,target?.kcal),remaining=target?target.kcal-used:null;return `<div class="nutrition-dashboard"><div class="energy-summary"><div class="calorie-ring" style="--progress:${energyPct * 3.6}deg" role="img" aria-label="${target?`${energyPct}% del objetivo energético orientativo`:'Objetivo energético sin configurar'}"><div class="ring-core"><span>Consumidas</span><strong>${fmt(used,0)}</strong><small>kcal</small></div></div><div class="energy-copy"><span class="eyebrow">Energía de hoy</span><strong>${target?`${fmt(used,0)} <small>/ ${fmt(target.kcal,0)} kcal</small>`:`${fmt(used,0)} kcal`}</strong><p>${target?`${remaining>=0?`${fmt(remaining,0)} kcal orientativas restantes`:`${fmt(Math.abs(remaining),0)} kcal sobre la referencia`}`:'Completa tus objetivos para ver el progreso diario.'}</p></div></div><div class="macro-progress">${[['protein','Proteínas','protein'],['carbs','Carbohidratos','carbs'],['fat','Grasas','fat']].map(([key,label,color])=>{const current=value(key),goal=target?.[key],progress=pct(current,goal);return `<div class="macro-line ${color}"><div class="macro-label"><span><i></i>${label}</span><strong>${fmt(current,1)} g${goal?` <small>/ ${fmt(goal,0)} g</small>`:''}</strong></div><div class="macro-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}" aria-label="Progreso de ${label}"><span style="width:${progress}%"></span></div></div>`;}).join('')}<div class="macro-foot"><span>${target?'Referencias calculadas desde tus objetivos':'Sin objetivos configurados'}</span>${target?`<strong>${state.profile.macroProtein}% P · ${state.profile.macroCarbs}% C · ${state.profile.macroFat}% G</strong>`:''}</div></div></div>`;}
+const tags=(f)=>f.source==='ejemplo'?'Ejemplo aproximado':f.source==='usuario'?'Personalizado':f.source==='receta'?'Receta propia':f.source==='marca'?'Marca · datos aportados':'Dato sin verificar';
+const foodBase=f=>f.baseUnit==='g'?'100 g':f.baseUnit==='ml'?'100 ml':f.baseUnit==='unidad'?'1 unidad':'1 ración';
+const infoMsg=()=>`${ui.error?`<div class="notice error" role="alert">${esc(ui.error)}</div>`:''}${ui.notice?`<div class="notice" role="status">${esc(ui.notice)}</div>`:''}${storageProblem?`<div class="notice error" role="alert">${esc(storageProblem)}</div>`:''}`;
+const btn=(action,text,cls='secondary',attrs='')=>`<button type="button" class="btn ${cls} small" data-action="${action}" ${attrs}>${text}</button>`;
+function notify(msg,error=false){if(error){ui.error=msg;ui.notice='';}else{ui.error='';ui.notice=msg;}render();}
+function persist(mutator,message='Cambios guardados en este dispositivo.'){
+  try{if(storageProblem)throw Error('Almacenamiento no disponible o con formato inválido. Exporta o importa una copia, o restablece los datos desde «Mis datos».');const copy=structuredClone(state);mutator(copy);writeState(copy);state=copy;ui.error='';ui.notice=message;render();return true;}
+  catch(e){ui.error=e.message||'No se han podido guardar los datos.';ui.notice='';render();return false;}
 }
-
-const h = s => String(s ?? '').replace(/[&<>"']/g, c => ({
-  '&':'&amp;', '<':'&lt;', '>':'&gt;',
-  '"':'&quot;', "'":'&#39;'
-}[c]));
-
-const uid = () => crypto.randomUUID();
-const foods = () => [...SAMPLE_FOODS, ...state.customFoods];
-const food = id => foods().find(f => f.id === id);
-const recipes = () => [...SAMPLE_RECIPES, ...state.customRecipes];
-const fmt = (n, unit='') => n == null || !Number.isFinite(n)
-  ? 'Sin dato' : `${Math.round(n*10)/10} ${unit}`.trim();
-
-const clone = obj => JSON.parse(JSON.stringify(obj));
-
-function save(change) {
-  const old = clone(state);
-  try {
-    if (loadError) throw Error('Hay datos que necesitan recuperarse.');
-    change();
-    writeState(state);
-    render();
-  } catch(e) {
-    state = old;
-    alert(e.message || 'No se pudieron guardar los cambios.');
+function navigate(page){if(!pages.some(p=>p[0]===page))return;if(page!=='alimentos'&&ui.photoURL){URL.revokeObjectURL(ui.photoURL);ui.photoURL=null;}ui.page=page;ui.modal=null;ui.error='';ui.notice='';render();window.scrollTo({top:0,behavior:'instant'});}
+function render(){
+ const el=$('#app');if(!el)return;
+ el.innerHTML=`<div class="app-shell"><header class="site-header"><div class="header-inner"><div class="brand" aria-label="NutriIA"><span class="logo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.8 3.8C12.2 3.6 6.7 6.4 5.2 11.5c-1 3.4.6 6.4 3.4 7.6 3.8 1.7 7.7-.4 9.5-4.6 1.5-3.4 1.3-7.2 1.7-10.7ZM6.9 17.4c2-3.6 5-6.4 9-8.4-2.9 2.5-5.2 5.5-6.6 8.9"/></svg></span><span>Nutri<strong>IA</strong></span></div><nav class="desktop-nav" aria-label="Navegación principal">${pages.map(([id,icon,label])=>`<button type="button" class="nav ${ui.page===id?'active':''}" data-action="navigate" data-page="${id}" aria-current="${ui.page===id?'page':'false'}"><span class="em">${icon}</span><span>${label}</span></button>`).join('')}</nav><div class="header-meta"><span></span>Datos locales</div></div></header><main class="main"><div class="topbar"><div><p>Tu nutrición, a tu ritmo</p></div><span class="badge">Privado · Gratis · Sin cuentas</span></div>${infoMsg()}${view()}</main></div><nav class="bottom-nav" aria-label="Navegación móvil">${pages.map(([id,icon,label])=>`<button type="button" class="${ui.page===id?'active':''}" data-action="navigate" data-page="${id}" aria-label="${label}"><span class="em">${icon}</span><span>${label}</span></button>`).join('')}</nav>${renderModal()}`;
+}
+function heading(title,subtitle,action=''){return `<div class="heading"><div><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`;}
+function view(){switch(ui.page){case'inicio':return homeView();case'diario':return diaryView();case'alimentos':return foodsView();case'recetas':return recipesView();case'actividad':return activityView();case'perfil':return profileView();case'datos':return dataView();default:return homeView();}}
+function dateControl(){return `<div class="datebar"><button type="button" class="btn ghost small" data-action="shift-date" data-offset="-1" aria-label="Día anterior">←</button><label class="sr-only" for="selected-day">Fecha</label><input id="selected-day" type="date" value="${ui.date}" aria-label="Seleccionar día"><button type="button" class="btn ghost small" data-action="shift-date" data-offset="1" aria-label="Día siguiente">→</button></div>`;}
+function homeView(){
+ const day=dayMeals(state,ui.date);const all=MEALS.flatMap(m=>day[m.id]||[]);const totalsDay=totalsForEntries(all);const maintenance=approximateMaintenance(state.profile);const weight=state.weightLog.slice().sort(byDate)[0]?.weight||state.profile.weight;
+ return `${heading(`Hola${state.profile.name?', '+esc(state.profile.name):''} 👋`,'Un lugar tranquilo para cuidar tu alimentación y tu movimiento.',btn('navigate','Abrir diario','secondary','data-page="diario"'))}
+ <div class="stack"><div class="panel highlight dashboard-panel"><div class="panel-head"><div><div class="kicker">Resumen de alimentación</div><h2>${readableDate(ui.date)}</h2></div>${dateControl()}</div>${macroDashboard(totalsDay)}<p class="footnote">Los valores pueden ser parciales si faltan nutrientes. Son información orientativa, no límites que debas cumplir.</p></div>
+ <div class="grid three"><div class="panel"><div class="panel-head"><h3>🎯 Tus objetivos</h3></div><p>${maintenance?`Mantenimiento energético estimado: <strong>${fmt(maintenance,0)} kcal/día</strong>.`:'Completa tu perfil para conocer una estimación educativa de tus necesidades.'}</p><p class="footnote">${maintenance?'El gasto real puede variar; no es una cifra exacta.':'Solo estimaciones para adultos.'}</p>${btn('navigate','Ver objetivos','secondary','data-page="perfil"')}</div>
+ <div class="panel"><div class="panel-head"><h3>🏃 Tu actividad</h3></div><p>Pasos registrados hoy: <strong>${fmt(state.stepsLog.find(x=>x.date===ui.date)?.steps??0,0)}</strong></p><p class="footnote">Puedes añadir pasos y entrenamientos manualmente.</p>${btn('navigate','Registrar actividad','secondary','data-page="actividad"')}</div>
+ <div class="panel"><div class="panel-head"><h3>⚖️ Evolución</h3></div><p>Último peso registrado: <strong>${weight?fmt(weight)+' kg':'Sin registros'}</strong></p><p class="footnote">Una anotación semanal es suficiente si deseas seguir tu evolución.</p>${btn('navigate','Ver seguimiento','secondary','data-page="actividad"')}</div></div>
+ <div class="grid"><div class="panel"><div class="panel-head"><h3>📒 Hoy en tu diario</h3></div>${MEALS.map(m=>`<div class="entry"><div class="entry-info"><strong>${m.icon} ${m.label}</strong><small>${(day[m.id]||[]).length} alimentos · ${totals(totalsForEntries(day[m.id]||[]),'kcal')}</small></div>${btn('entry-open','+ Añadir','secondary',`data-meal="${m.id}"`)}</div>`).join('')}</div><div class="panel"><div class="panel-head"><h3>💡 Ideas para comer</h3>${btn('navigate','Ver recetas','secondary','data-page="recetas"')}</div>${SAMPLE_RECIPES.slice(0,3).map(r=>`<div class="entry"><div class="entry-info"><strong>${esc(r.title)}</strong><small>⏱ ${r.minutes} min · ${totals(recipeNutrition(r).per,'kcal')} por ración</small></div>${btn('recipe-open','Ver','ghost',`data-id="${r.id}"`)}</div>`).join('')}<p class="footnote">Recetas sencillas con cálculos aproximados realizados a partir de alimentos de ejemplo.</p></div></div></div>`;
+}
+function diaryView(){const day=dayMeals(state,ui.date);return `${heading('Diario de alimentación','Anota tus comidas, cambia de día y revisa los totales.')}
+ <div class="panel highlight dashboard-panel" style="margin-bottom:18px"><div class="panel-head"><div><div class="kicker">Resumen del día</div><h2>${readableDate(ui.date)}</h2></div>${dateControl()}</div>${macroDashboard(totalsForEntries(MEALS.flatMap(m=>day[m.id]||[])))}<p class="footnote">Los totales que incluyen valores desconocidos aparecen como parciales.</p></div>
+ <div class="grid">${MEALS.map(m=>{const entries=day[m.id]||[];const t=totalsForEntries(entries);return `<section class="panel meal-card"><div class="panel-head"><div><h3>${m.icon} ${m.label}</h3><small>${totals(t,'kcal')} · ${totals(t,'protein')} de proteína</small></div><div class="actions">${btn('entry-open','+ Alimento','secondary',`data-meal="${m.id}"`)}${btn('meal-save','Guardar comida','ghost',`data-meal="${m.id}" ${entries.length?'':'disabled'}`)}</div></div>${entries.length?entries.map(e=>`<div class="entry"><div class="entry-info"><strong>${esc(e.food.name)}</strong><small>${fmt(e.quantity)} ${esc(e.unit)} · ${nutrient(scaleNutrition(e.food,e.quantity,e.unit),'kcal')}</small></div><div class="actions">${btn('entry-open','Editar','ghost',`data-meal="${m.id}" data-id="${e.id}"`)}${btn('entry-delete','✕','danger',`data-meal="${m.id}" data-id="${e.id}" aria-label="Eliminar ${esc(e.food.name)}"`)}</div></div>`).join(''):'<div class="empty">Aún no has añadido alimentos a esta comida.</div>'}<div class="actions" style="margin-top:14px">${btn('saved-apply-open','Usar comida guardada','secondary',`data-meal="${m.id}"`)}</div><details style="margin-top:15px"><summary>Ver macronutrientes, azúcares y micronutrientes</summary><div class="table-scroll"><table class="microtable"><tbody>${KEYS.map(k=>`<tr><th>${LABELS[k]}</th><td>${totals(t,k)}</td></tr>`).join('')}</tbody></table></div></details></section>`;}).join('')}</div>
+ <div class="panel" style="margin-top:18px"><div class="panel-head"><h3>🗒️ Comidas guardadas</h3></div>${savedMealsList()}</div>`;}
+function savedMealsList(){return state.savedMeals.length?`<div class="item-list">${state.savedMeals.map(m=>`<div class="list-item"><div><strong>${esc(m.name)}</strong><small style="display:block">${m.items.length} alimentos · ${totals(totalsForEntries(m.items),'kcal')}</small></div><div class="actions">${btn('saved-editor','Editar','ghost',`data-id="${m.id}"`)}${btn('saved-duplicate','Duplicar','secondary',`data-id="${m.id}"`)}${btn('saved-delete','Eliminar','danger',`data-id="${m.id}"`)}</div></div>`).join('')}</div>`:'<div class="empty">Guarda una comida desde el diario para volver a utilizarla.</div>';}
+function foodsView(){const q=ui.foodSearch.trim().toLocaleLowerCase('es');let list=foods().filter(f=>(f.name.toLocaleLowerCase('es').includes(q))&&(ui.foodFilter==='todos'||(ui.foodFilter==='favoritos'?state.favourites.foods.includes(f.id):ui.foodFilter==='personalizados'?f.source!=='ejemplo':f.source==='ejemplo')));list=list.slice(0,100);
+ return `${heading('Alimentos','Busca alimentos de ejemplo o añade tus propios datos.',btn('food-open','+ Crear alimento','primary'))}
+ <section class="panel stack"><form id="food-search-form" class="filters"><label class="sr-only" for="food-query">Buscar alimentos</label><input id="food-query" name="q" placeholder="Ej. avena, pollo, yogur…" value="${esc(ui.foodSearch)}"><button class="btn" type="submit">Buscar</button><label class="sr-only" for="food-filter">Filtrar alimentos</label><select id="food-filter"><option value="todos" ${ui.foodFilter==='todos'?'selected':''}>Todos</option><option value="ejemplos" ${ui.foodFilter==='ejemplos'?'selected':''}>Ejemplos</option><option value="personalizados" ${ui.foodFilter==='personalizados'?'selected':''}>Propios</option><option value="favoritos" ${ui.foodFilter==='favoritos'?'selected':''}>Favoritos</option></select></form><p class="tip">${list.length} resultados visibles. La colección incluida es pequeña y <strong>aproximada, no verificada</strong>. Valores por 100 g, 100 ml o unidad según cada alimento.</p>
+ <div class="food-grid">${list.length?list.map(f=>`<article class="food-card"><header><div><strong>${esc(f.name)}</strong><span class="fine">${tags(f)} · por ${foodBase(f)}</span></div><button type="button" class="btn ghost small" data-action="food-fav" data-id="${f.id}" aria-label="${state.favourites.foods.includes(f.id)?'Quitar de':'Añadir a'} favoritos" aria-pressed="${state.favourites.foods.includes(f.id)}">${state.favourites.foods.includes(f.id)?'★':'☆'}</button></header><div class="muted">${nutrient(f.nutrition,'kcal')} · P ${nutrient(f.nutrition,'protein')} · C ${nutrient(f.nutrition,'carbs')} · G ${nutrient(f.nutrition,'fat')}</div><div class="actions">${btn('entry-open','Añadir al diario','secondary',`data-food="${f.id}"`)}${btn('food-details','Nutrientes','ghost',`data-id="${f.id}"`)}${f.source!=='ejemplo'?btn('food-open','Editar','ghost',`data-id="${f.id}"`):''}</div></article>`).join(''):'<div class="empty">No hay alimentos con ese nombre o filtro.</div>'}</div></section>`;
+}
+function recipesView(){const q=ui.recipeSearch.trim().toLocaleLowerCase('es');const list=recipes().filter(r=>(r.title.toLocaleLowerCase('es').includes(q)||r.ingredients.some(e=>e.food.name.toLocaleLowerCase('es').includes(q)))&&(ui.recipeFilter==='todas'||(ui.recipeFilter==='favoritas'?state.favourites.recipes.includes(r.id):ui.recipeFilter==='propias'?r.source==='usuario':ui.recipeFilter==='rapidas'?r.minutes<=15:r.tags?.includes('Económica'))));
+ return `${heading('Recetas fáciles y económicas','Explora, guarda y añade una ración a tu diario.',btn('recipe-edit','+ Mi receta','primary'))}
+ <section class="panel stack"><form id="recipe-search-form" class="filters"><label class="sr-only" for="recipe-query">Buscar recetas</label><input name="q" id="recipe-query" value="${esc(ui.recipeSearch)}" placeholder="Buscar por receta o ingrediente"><button type="submit" class="btn">Buscar</button><label class="sr-only" for="recipe-filter">Filtrar recetas</label><select id="recipe-filter"><option value="todas">Todas</option><option value="rapidas" ${ui.recipeFilter==='rapidas'?'selected':''}>≤ 15 minutos</option><option value="economicas" ${ui.recipeFilter==='economicas'?'selected':''}>Económicas</option><option value="favoritas" ${ui.recipeFilter==='favoritas'?'selected':''}>Favoritas</option><option value="propias" ${ui.recipeFilter==='propias'?'selected':''}>Propias</option></select></form><div class="recipe-grid">${list.length?list.map(r=>`<article class="recipe-card"><header><div><strong>${esc(r.title)}</strong><span class="fine">${r.source==='ejemplo'?'Ejemplo aproximado':'Receta personalizada'}</span></div><button class="btn ghost small" type="button" data-action="recipe-fav" data-id="${r.id}" aria-pressed="${state.favourites.recipes.includes(r.id)}" aria-label="Favorito">${state.favourites.recipes.includes(r.id)?'★':'☆'}</button></header><div class="recipe-meta"><span class="pill">⏱ ${fmt(r.minutes,0)} min</span><span class="pill">🍽 ${fmt(r.servings)} raciones</span>${(r.tags||[]).map(t=>`<span class="pill">${esc(t)}</span>`).join('')}</div><p class="muted">${totals(recipeNutrition(r).per,'kcal')} · ${totals(recipeNutrition(r).per,'protein')} proteína por ración</p><div class="actions">${btn('recipe-open','Ver receta','secondary',`data-id="${r.id}"`)}${r.source==='usuario'?btn('recipe-edit','Editar','ghost',`data-id="${r.id}"`):''}</div></article>`).join(''):'<div class="empty">No hay recetas con esos criterios.</div>'}</div><p class="tip">Los nutrientes de las recetas se calculan desde los ingredientes; no se infieren valores desconocidos.</p></section>`;
+}
+function activityView(){const steps=state.stepsLog.find(x=>x.date===ui.date)?.steps??'';const weight=state.weightLog.slice().sort(byDate);const recent=weight.slice(0,8).reverse();const max=recent.length?Math.max(...recent.map(x=>x.weight)):0;const min=recent.length?Math.min(...recent.map(x=>x.weight)):0;
+ return `${heading('Actividad y progreso','Registra pasos, entrenamientos y peso cuando te resulte útil.')}
+ <div class="grid"><section class="panel"><div class="panel-head"><h3>👣 Pasos diarios</h3></div><form id="steps-form" class="stack"><div class="field"><label for="steps-date">Fecha</label><input id="steps-date" name="date" type="date" value="${ui.date}" required></div><div class="field"><label for="steps-value">Pasos (registro manual)</label><input id="steps-value" name="steps" type="number" inputmode="numeric" min="0" max="200000" step="1" value="${steps}" required></div><button class="btn" type="submit">Guardar pasos</button></form><p class="footnote">Una PWA no cuenta pasos automáticamente en segundo plano. Puedes copiarlos de la app de salud de tu teléfono.</p></section>
+ <section class="panel"><div class="panel-head"><h3>⚖️ Peso semanal</h3></div><form id="weight-form" class="stack"><div class="fields2"><div><label for="weight-date">Fecha</label><input name="date" id="weight-date" type="date" value="${ui.date}" required></div><div><label for="weight-value">Peso (kg)</label><input name="weight" id="weight-value" type="number" min="1" max="500" step="0.1" inputmode="decimal" placeholder="Ej. 78,5" required></div></div><button class="btn" type="submit">Guardar peso</button></form>${weight.length?`<p class="footnote">Última medición: ${fmt(weight[0].weight)} kg · ${readableDate(weight[0].date)}</p>`:'<p class="footnote">Puedes registrar tu peso una vez a la semana, sin necesidad de hacerlo a diario.</p>'}${recent.length>1?`<div class="vchart" role="img" aria-label="Evolución del peso en las últimas mediciones">${recent.map(x=>`<div style="flex:1"><div class="bar" title="${x.date}: ${x.weight} kg" style="height:${Math.round(35+((x.weight-min)/(max-min||1))*75)}px"></div><div class="vchart-label">${x.date.slice(5)}</div></div>`).join('')}</div>`:''}</section></div>
+ <div class="grid" style="margin-top:18px"><section class="panel"><div class="panel-head"><h3>🏋️ Entrenamientos</h3></div><form id="workout-form"><input name="id" type="hidden" value=""><div class="fields3"><div><label for="workout-date">Fecha</label><input type="date" name="date" id="workout-date" value="${ui.date}" required></div><div><label for="workout-type">Actividad</label><input name="type" id="workout-type" maxlength="140" placeholder="Caminar, fuerza…" required></div><div><label for="workout-minutes">Minutos</label><input type="number" name="minutes" id="workout-minutes" min="1" max="1440" step="1" required></div></div><div class="field"><label for="workout-note">Notas (opcional)</label><textarea name="note" id="workout-note" maxlength="2000" placeholder="Cómo fue la sesión, ejercicios, series…"></textarea></div><button class="btn" type="submit">Guardar entrenamiento</button></form><div class="item-list" style="margin-top:16px">${state.workouts.length?state.workouts.slice().sort(byDate).slice(0,25).map(w=>`<div class="list-item"><div><strong>${esc(w.type)}</strong><small style="display:block">${w.date} · ${fmt(w.minutes,0)} min · ${esc(w.note||'')}</small></div><div class="actions">${btn('workout-edit','Editar','ghost',`data-id="${w.id}"`)}${btn('workout-delete','✕','danger',`data-id="${w.id}"`)}</div></div>`).join(''):'<div class="empty">Sin entrenamientos registrados.</div>'}</div></section>
+ <section class="panel"><div class="panel-head"><h3>📈 Historial de peso</h3></div><div class="item-list">${weight.length?weight.slice(0,20).map(w=>`<div class="list-item"><span>${w.date} · <strong>${fmt(w.weight)} kg</strong></span>${btn('weight-delete','Eliminar','danger',`data-date="${w.date}"`)}</div>`).join(''):'<div class="empty">Sin registros de peso.</div>'}</div><div class="divider"></div><h3>👣 Historial reciente de pasos</h3><div class="item-list">${state.stepsLog.length?state.stepsLog.slice().sort(byDate).slice(0,10).map(x=>`<div class="list-item"><span>${x.date} · ${fmt(x.steps,0)} pasos</span>${btn('steps-delete','✕','danger',`data-date="${x.date}"`)}</div>`).join(''):'<div class="empty">Sin registros de pasos.</div>'}</div></section></div>`;
+}
+function macroAdvice(profile){const maintenance=approximateMaintenance(profile);if(!maintenance)return `<div class="notice">${Number(profile.age)>0&&Number(profile.age)<18?'Para menores de 18 años no calculamos automáticamente déficits ni superávits; consultar a un profesional sanitario es lo adecuado.':'Introduce edad (18+), peso, altura, sexo para la fórmula y actividad para ver una estimación educativa.'}</div>`;
+ const factorGoal={mantener:1,perder:.9,ganar:1.1}[profile.goal]??1;const estimate=Math.round(maintenance*factorGoal);const mp=Number(profile.macroProtein??25),mc=Number(profile.macroCarbs??45),mf=Number(profile.macroFat??30);return `<div class="panel highlight"><div class="panel-head"><h3>Orientación energética para tu objetivo</h3><span class="pill">Estimación, no prescripción</span></div><div class="stat-row"><div class="stat"><small>Mantenimiento</small><strong>${fmt(maintenance,0)} kcal</strong></div><div class="stat"><small>${profile.goal==='perder'?'Referencia con reducción moderada':profile.goal==='ganar'?'Referencia con aumento moderado':'Referencia de mantenimiento'}</small><strong>${fmt(estimate,0)} kcal</strong></div><div class="stat"><small>Proteínas (${mp} % energía)</small><strong>${fmt(estimate*mp/100/4,0)} g</strong></div><div class="stat"><small>Carbohidratos (${mc} %)</small><strong>${fmt(estimate*mc/100/4,0)} g</strong></div></div><div class="goal-bar"><span>Grasas (${mf} %)</span><strong>${fmt(estimate*mf/100/9,0)} g orientativos</strong></div><p class="footnote">Estimación general basada en Mifflin–St Jeor y un factor de actividad. No sustituye a un dietista-nutricionista. Puedes cambiar tus porcentajes; son orientativos y no necesitan cumplirse exactamente. El gasto real cambia con el tiempo; no utilizar para embarazo, enfermedad o pautas médicas especiales.</p></div>`;}
+function profileView(){const p=state.profile;const option=(v,t)=>`<option value="${v}" ${String(p.goal)===v?'selected':''}>${t}</option>`;return `${heading('Tu perfil y objetivos','Puedes cambiar tus datos y tu objetivo siempre que quieras.')}
+ <div class="split"><section class="panel"><h3 style="margin-bottom:15px">👤 Configura tu perfil local</h3><form id="profile-form"><div class="fields2"><div class="field"><label for="name">Nombre o apodo</label><input name="name" id="name" maxlength="80" value="${esc(p.name)}" placeholder="Opcional"></div><div class="field"><label for="age">Edad (años)</label><input name="age" id="age" type="number" min="1" max="120" step="1" value="${esc(p.age)}" required></div><div class="field"><label for="height">Altura (cm)</label><input name="height" id="height" type="number" min="80" max="250" step="0.1" value="${esc(p.height)}" required></div><div class="field"><label for="weight">Peso (kg)</label><input name="weight" id="weight" type="number" min="1" max="500" step="0.1" value="${esc(p.weight)}" required></div><div class="field"><label for="sex">Sexo usado en la fórmula (opcional)</label><select name="sex" id="sex"><option value="">No indicar</option><option value="male" ${p.sex==='male'?'selected':''}>Masculino</option><option value="female" ${p.sex==='female'?'selected':''}>Femenino</option></select></div><div class="field"><label for="activity">Actividad habitual</label><select name="activity" id="activity"><option value="1.2" ${p.activity==='1.2'?'selected':''}>Sedentaria</option><option value="1.375" ${p.activity==='1.375'?'selected':''}>Ligera</option><option value="1.55" ${p.activity==='1.55'?'selected':''}>Moderada</option><option value="1.725" ${p.activity==='1.725'?'selected':''}>Muy activa</option></select></div></div><div class="field"><label for="goal">Objetivo</label><select name="goal" id="goal">${option('mantener','Mantenerme')}${option('perder','Reducir peso')}${option('ganar','Aumentar masa / peso')}</select></div><div class="field"><label>Distribución orientativa de macros (%)</label><div class="fields3"><div><label for="macro-protein">Proteínas</label><input id="macro-protein" name="macroProtein" type="number" min="0" max="100" step="1" value="${p.macroProtein??25}" required></div><div><label for="macro-carbs">Carbohidratos</label><input id="macro-carbs" name="macroCarbs" type="number" min="0" max="100" step="1" value="${p.macroCarbs??45}" required></div><div><label for="macro-fat">Grasas</label><input id="macro-fat" name="macroFat" type="number" min="0" max="100" step="1" value="${p.macroFat??30}" required></div></div><p class="footnote">Los tres valores deben sumar 100 %. Puedes modificarlos sin perder registros anteriores.</p></div><button type="submit" class="btn">Guardar mis objetivos</button></form><p class="footnote">Este perfil no es una cuenta de usuario y no se sincroniza. No introduzcas datos de otra persona en un dispositivo compartido.</p></section>
+ <div class="stack"><section class="panel"><h3>🥑 Alimentación sin rigidez</h3><ul><li><strong>Proteínas:</strong> ayudan a mantener y reparar tejidos.</li><li><strong>Carbohidratos:</strong> fuente importante de energía.</li><li><strong>Grasas:</strong> necesarias para funciones celulares y hormonales.</li><li><strong>Vitaminas y minerales:</strong> apoyan múltiples funciones del organismo.</li><li><strong>Azúcares:</strong> forman parte de los carbohidratos; la etiqueta no indica por sí sola si un alimento es adecuado.</li></ul><p class="footnote">Procura variedad, suficiente alimentación y flexibilidad. No hay alimentos moralmente buenos o malos.</p></section>${macroAdvice(p)}</div></div>`;}
+function dataView(){return `${heading('Tus datos y privacidad','Todo se conserva localmente en este navegador, sin cuenta ni conexión obligatoria.')}
+ <div class="grid"><section class="panel stack"><h3>💾 Copia de seguridad</h3><p>Descarga un archivo JSON con tu diario, alimentos, recetas, objetivos y actividad. Puedes importarlo de nuevo en este u otro dispositivo.</p><div class="actions">${btn('export','Exportar datos','secondary')}${btn('import-open','Importar copia','ghost')}</div><p class="footnote">Exporta antes de limpiar el navegador o cambiar de móvil. Los datos de un navegador no se sincronizan solos y pueden perderse al borrar sus datos.</p></section><section class="panel stack"><h3>🛡️ Borrar datos</h3><p>Borra los registros de NutriIA almacenados en este navegador. Es una acción irreversible salvo que hayas exportado una copia.</p>${btn('wipe','Borrar mis datos','danger')}<p class="footnote">Esta versión no envía tus datos a una base externa. Las fotos seleccionadas no se suben ni se guardan.</p></section></div><section class="panel" style="margin-top:18px"><h3>Estado de la aplicación</h3><p class="footnote">PWA sin servicios de pago, publicidad ni cuentas simuladas. Funciona sin red después de la primera carga si el navegador admite Service Workers. Esta primera versión usa datos nutricionales de ejemplo aproximados y permite aportar alimentos personalizados. Conteo de pasos automático y análisis visual con IA están pendientes.</p><p class="footnote">No uses esta app en equipos compartidos si necesitas privacidad entre diferentes personas. Para cuentas reales haría falta autenticación y reglas de acceso a datos en un servidor.</p></section>`;}
+function wrapModal(title,body){return `<div class="modal-backdrop"><section class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-head"><div><h2>${esc(title)}</h2><p class="footnote">${ui.modal?.subtitle?esc(ui.modal.subtitle):''}</p></div><button type="button" class="btn ghost small" data-action="modal-close" aria-label="Cerrar">✕ Cerrar</button></div>${body}</section></div>`;}
+function itemOptions(selected){return foods().map(f=>`<option value="${esc(f.id)}" ${f.id===selected?'selected':''}>${esc(f.name)} · ${tags(f)}</option>`).join('');}
+function unitOptions(f,selected){return allowedUnits(f).map(x=>`<option value="${x}" ${x===selected?'selected':''}>${x==='racion'?'ración':x}</option>`).join('');}
+function modalEntry(){const m=ui.modal;const current=m.id?(m.savedId?state.savedMeals.find(x=>x.id===m.savedId)?.items:dayMeals(state,ui.date)[m.meal])?.find(x=>x.id===m.id):null;const f=findFood(m.foodId)||current?.food||foods()[0];if(!f)return wrapModal('Añadir alimento','No hay alimentos disponibles.');const selectedQty=m.qty??current?.quantity??(['unidad','racion'].includes(f.baseUnit)?1:100), selectedUnit=m.unit??current?.unit??allowedUnits(f)[0];
+ return wrapModal(current?'Editar cantidad':'Añadir alimento',`<form id="entry-form"><div class="field"><label for="entry-food">Alimento</label><select id="entry-food" name="foodId" required>${!findFood(f.id)?`<option value="${esc(f.id)}" selected>${esc(f.name)} (registro antiguo)</option>`:''}${itemOptions(f.id)}</select></div><div class="fields2"><div class="field"><label for="entry-quantity">Cantidad</label><input id="entry-quantity" name="quantity" type="number" step="any" inputmode="decimal" min="0.001" max="100000" value="${selectedQty}" required></div><div class="field"><label for="entry-unit">Unidad</label><select id="entry-unit" name="unit" required>${unitOptions(f,selectedUnit)}</select></div></div><div class="selection"><strong>Valor de referencia:</strong> ${esc(f.name)}, por ${foodBase(f)}. <span class="fine">${tags(f)}.</span><div style="margin-top:8px">${['kcal','protein','carbs','fat','sugar'].map(k=>`${LABELS[k]}: ${nutrient(f.nutrition,k)}`).join(' · ')}</div></div>${m.savedId?'':`<div class="field" style="margin-top:14px"><label for="entry-meal">Comida</label><select id="entry-meal" name="meal">${MEALS.map(x=>`<option value="${x.id}" ${x.id===m.meal?'selected':''}>${x.label}</option>`).join('')}</select></div>`}<div class="actions"><button type="submit" class="btn">${current?'Guardar cambios':'Añadir alimento'}</button></div></form>`);
+}
+function modalFood(){const f=state.customFoods.find(x=>x.id===ui.modal.id);const b=f?.baseUnit||'g';return wrapModal(f?'Editar alimento':'Crear alimento personalizado',`<form id="food-form"><div class="fields2"><div class="field"><label for="f-name">Nombre</label><input id="f-name" name="name" maxlength="140" value="${esc(f?.name||'')}" placeholder="Ej. Yogur de marca X" required></div><div class="field"><label for="f-type">Tipo</label><select name="type" id="f-type"><option value="usuario" ${f?.source!=='marca'?'selected':''}>Genérico personalizado</option><option value="marca" ${f?.source==='marca'?'selected':''}>Producto de marca (dato aportado)</option></select></div><div class="field"><label for="f-base">Valores por</label><select id="f-base" name="baseUnit"><option value="g" ${b==='g'?'selected':''}>100 gramos</option><option value="ml" ${b==='ml'?'selected':''}>100 mililitros</option><option value="unidad" ${b==='unidad'?'selected':''}>1 unidad</option><option value="racion" ${b==='racion'?'selected':''}>1 ración</option></select></div><div class="field"><label for="f-source">Origen o anotación (opcional)</label><input id="f-source" name="sourceNote" maxlength="240" value="${esc(f?.sourceNote||'')}" placeholder="Ej. etiqueta del envase"></div></div><p class="inline-helper">Deja en blanco un nutriente si lo desconoces. Escribir <strong>0</strong> significa que sabes que su valor es cero. Comprueba los datos con el envase o una fuente fiable.</p><div class="fields3" style="margin-top:15px">${KEYS.map(k=>`<div class="field"><label for="nut-${k}">${LABELS[k]} (${NUTRIENT_UNITS[k]})</label><input id="nut-${k}" name="nut-${k}" type="number" step="any" min="0" max="100000" inputmode="decimal" placeholder="Desconocido" value="${f?.nutrition?.[k]??''}"></div>`).join('')}</div><div class="actions"><button type="submit" class="btn">Guardar alimento</button>${f?btn('food-delete','Eliminar alimento','danger',`data-id="${f.id}"`):''}</div></form>`);}
+function modalFoodDetails(){const f=findFood(ui.modal.id);if(!f)return '';return wrapModal('Información nutricional',`<h3>${esc(f.name)}</h3><p class="footnote">${tags(f)} · Valores por ${foodBase(f)} ${f.sourceNote?`· Origen declarado: ${esc(f.sourceNote)}`:''}</p><div class="table-scroll"><table class="microtable"><tbody>${KEYS.map(k=>`<tr><th>${LABELS[k]}</th><td>${nutrient(f.nutrition,k)}</td></tr>`).join('')}</tbody></table></div><p class="footnote">«Desconocido» no significa cero. Estos datos no son un análisis de laboratorio.</p>`);}
+function syncRecipeDraft(){if(!ui.recipeDraft)return;const form=$('#recipe-form');if(!form)return;ui.recipeDraft.title=form.querySelector('[name="title"]').value;ui.recipeDraft.steps=form.querySelector('[name="steps"]').value;ui.recipeDraft.minutes=form.querySelector('[name="minutes"]').value;ui.recipeDraft.servings=form.querySelector('[name="servings"]').value;}
+function modalRecipeEdit(){const d=ui.recipeDraft;return wrapModal(d?.id?'Editar receta':'Crear receta propia',`<form id="recipe-form"><div class="field"><label for="r-title">Título de la receta</label><input id="r-title" name="title" maxlength="140" value="${esc(d?.title||'')}" required></div><div class="fields2"><div class="field"><label for="r-minutes">Tiempo estimado (min)</label><input id="r-minutes" type="number" name="minutes" min="1" max="1440" step="1" value="${d?.minutes||15}" required></div><div class="field"><label for="r-servings">Raciones de la receta</label><input id="r-servings" type="number" name="servings" min="1" max="100" step="1" value="${d?.servings||1}" required></div></div><h3 style="margin:12px 0">Ingredientes</h3><div class="item-list">${d.ingredients.length?d.ingredients.map((e,i)=>`<div class="list-item"><span>${esc(e.food.name)} — ${fmt(e.quantity)} ${esc(e.unit)}</span>${btn('recipe-ingredient-delete','✕','danger',`data-index="${i}"`)}</div>`).join(''):'<div class="empty">Añade al menos un ingrediente.</div>'}</div><div class="fields3" style="margin-top:13px"><div><label for="r-food">Alimento</label><select id="r-food" name="ingredientFood">${itemOptions(d.selectedFood||foods()[0].id)}</select></div><div><label for="r-quantity">Cantidad</label><input id="r-quantity" name="ingredientQty" type="number" step="any" min="0.001" max="100000" value="100"></div><div><label for="r-unit">Unidad</label><select id="r-unit" name="ingredientUnit">${unitOptions(findFood(d.selectedFood)||foods()[0])}</select></div></div><div class="actions">${btn('recipe-ingredient-add','+ Incorporar ingrediente','secondary')}</div><div class="field" style="margin-top:16px"><label for="r-steps">Preparación</label><textarea id="r-steps" name="steps" maxlength="4000" placeholder="Describe los pasos…" required>${esc(d?.steps||'')}</textarea></div><div class="actions"><button type="submit" class="btn">Guardar receta</button>${d.id?btn('recipe-delete','Eliminar receta','danger',`data-id="${d.id}"`):''}</div></form>`);}
+function modalRecipeDetails(){const r=findRecipe(ui.modal.id);if(!r)return '';const count=ui.modal.count||r.servings;const ratio=count/r.servings;const full=recipeNutrition(r).total;const scaled={};for(const k of KEYS)scaled[k]={value:full[k].value*ratio,missing:full[k].missing,known:full[k].known};return wrapModal(r.title,`<p class="fine">⏱ ${r.minutes} minutos · ${r.source==='ejemplo'?'Receta de ejemplo':'Receta propia'} · valores aproximados</p><div class="fields2" style="margin:14px 0"><div><label for="recipe-servings">Raciones que quieres preparar</label><input id="recipe-servings" type="number" min="1" max="100" step="1" value="${count}"></div><div class="selection"><strong>Por ración:</strong> ${totals(recipeNutrition(r).per,'kcal')} · P ${totals(recipeNutrition(r).per,'protein')} · C ${totals(recipeNutrition(r).per,'carbs')} · G ${totals(recipeNutrition(r).per,'fat')}</div></div><h3>Ingredientes para ${count} raciones</h3><div class="item-list" style="margin-top:10px">${r.ingredients.map(e=>`<div class="list-item"><span>${esc(e.food.name)}</span><strong>${fmt(e.quantity*ratio,2)} ${esc(e.unit)}</strong></div>`).join('')}</div><h3 style="margin-top:18px">Preparación</h3><p style="white-space:pre-line;margin-top:8px">${esc(r.steps)}</p><hr class="divider"><h3>Nutrición de la receta completa</h3>${macroTiles(scaled)}<div class="table-scroll" style="margin-top:13px"><table class="microtable"><tbody>${MICRO_KEYS.map(k=>`<tr><th>${LABELS[k]}</th><td>${totals(scaled,k)}</td></tr>`).join('')}</tbody></table></div><p class="footnote">Una sola entrada de receta cuenta como una ración en el diario. No se duplican sus ingredientes. Los alérgenos deben comprobarse en los ingredientes y etiquetas reales.</p><div class="actions"><label class="sr-only" for="recipe-diary-meal">Comida del diario</label><select style="max-width:210px" id="recipe-diary-meal">${MEALS.map(m=>`<option value="${m.id}">${m.label}</option>`).join('')}</select>${btn('recipe-to-diary','Añadir 1 ración al diario','secondary',`data-id="${r.id}"`)}${btn('recipe-fav','★ Guardar favorito','ghost',`data-id="${r.id}"`)}</div>`);}
+function modalSavedEditor(){const m=state.savedMeals.find(x=>x.id===ui.modal.id);if(!m)return '';return wrapModal('Editar comida guardada',`<form id="saved-name-form"><div class="field"><label for="saved-name">Nombre</label><input id="saved-name" name="name" maxlength="140" value="${esc(m.name)}" required></div><button class="btn small" type="submit">Guardar nombre</button></form><h3 style="margin:16px 0 10px">Ingredientes guardados</h3><div class="item-list">${m.items.map(e=>`<div class="list-item"><div><strong>${esc(e.food.name)}</strong><small style="display:block">${fmt(e.quantity)} ${esc(e.unit)}</small></div><div class="actions">${btn('saved-item-edit','Editar','ghost',`data-saved="${m.id}" data-id="${e.id}"`)}${btn('saved-item-delete','✕','danger',`data-saved="${m.id}" data-id="${e.id}"`)}</div></div>`).join('')}</div><div class="actions">${btn('saved-item-add','+ Añadir ingrediente','secondary',`data-saved="${m.id}"`)}</div><p class="footnote">Al editar esta plantilla no cambiarán las comidas que ya estén en tu diario.</p>`);}
+function modalSavedApply(){return wrapModal('Usar comida guardada',`<form id="saved-apply-form"><div class="field"><label for="saved-choose">Comida</label><select name="savedId" id="saved-choose" required>${state.savedMeals.map(m=>`<option value="${m.id}">${esc(m.name)} (${m.items.length} alimentos)</option>`).join('')}</select></div><div class="field"><label for="saved-target">Añadir en</label><select name="meal" id="saved-target">${MEALS.map(m=>`<option value="${m.id}" ${ui.modal.meal===m.id?'selected':''}>${m.label}</option>`).join('')}</select></div><button type="submit" class="btn" ${state.savedMeals.length?'':'disabled'}>Añadir al diario</button></form>`);}
+function modalMealSave(){return wrapModal('Guardar comida completa',`<form id="meal-save-form"><div class="field"><label for="meal-save-name">Nombre de tu comida</label><input id="meal-save-name" name="name" maxlength="140" value="${esc('Mi '+MEALS.find(m=>m.id===ui.modal.meal).label.toLowerCase())}" required></div><p class="footnote">Se conservarán los ingredientes y cantidades actuales, sin modificar el diario.</p><button type="submit" class="btn">Guardar plantilla</button></form>`);}
+function modalImport(){return wrapModal('Importar una copia de seguridad',`<form id="import-form"><div class="field"><label for="import-file">Archivo JSON exportado de NutriIA</label><input id="import-file" type="file" name="file" accept=".json,application/json" required></div><p class="notice error">Al importar, se sustituirán los datos actuales de este navegador. Exporta primero una copia de seguridad.</p><button type="submit" class="btn">Revisar e importar</button></form>`);}
+function renderModal(){if(!ui.modal)return '';switch(ui.modal.type){case'entry':return modalEntry();case'food':return modalFood();case'food-details':return modalFoodDetails();case'recipe':return modalRecipeEdit();case'recipe-details':return modalRecipeDetails();case'saved-editor':return modalSavedEditor();case'saved-apply':return modalSavedApply();case'meal-save':return modalMealSave();case'import':return modalImport();default:return '';}}
+function closeModal(){if(ui.photoURL){URL.revokeObjectURL(ui.photoURL);ui.photoURL=null;}ui.modal=null;render();}
+function foodForRecipeId(id){return findFood(id)||SAMPLE_FOODS[0];}
+function openRecipeEditor(id){const r=state.customRecipes.find(x=>x.id===id);ui.recipeDraft=r?structuredClone(r):{id:null,title:'',minutes:15,servings:1,steps:'',ingredients:[]};ui.recipeDraft.selectedFood=foods()[0]?.id;ui.modal={type:'recipe'};render();}
+function safeDate(iso){const parsed=new Date(iso+'T12:00:00');if(!/^\d{4}-\d{2}-\d{2}$/.test(iso)||Number.isNaN(parsed.getTime())||todayISO(parsed)!==iso)throw Error('Introduce una fecha válida.');return iso;}
+function ensurePositive(form,name,max=100000){const value=parseNumber(new FormData(form).get(name),{max});if(value===null)throw Error(`Revisa el valor del campo ${name}.`);return value;}
+function withAction(fn){try{fn();}catch(e){notify(e.message||'No se pudo completar la operación.',true);}}
+function toggleFavourite(kind,id){persist(s=>{const arr=s.favourites[kind];const i=arr.indexOf(id);if(i>=0)arr.splice(i,1);else arr.push(id);},'Favoritos actualizados.');}
+function addRecipeDiary(r,meal){const food=nutritionPerServingFood(r);const e=createEntry(food,1,'racion');return persist(s=>{const arr=ensureDay(s,ui.date)[meal];if(duplicateEntryFound(arr,e)&&!confirm('Ya hay una ración idéntica en esta comida. ¿Añadir otra?'))throw Error('Se ha cancelado la entrada duplicada.');arr.push(e);},`Una ración de «${r.title}» añadida al diario.`);}
+function handleClick(event){const b=event.target.closest('[data-action]');if(!b)return;const action=b.dataset.action,id=b.dataset.id,meal=b.dataset.meal||'desayuno';
+ withAction(()=>{switch(action){
+  case'navigate':navigate(b.dataset.page);break;
+  case'shift-date':ui.date=shiftDate(ui.date,Number(b.dataset.offset));render();break;
+  case'modal-close':closeModal();break;
+  case'entry-open':ui.modal={type:'entry',id:id||null,meal,foodId:b.dataset.food||null};render();break;
+  case'entry-delete':if(!confirm('¿Eliminar esta entrada del diario?'))break;persist(s=>{s.diary[ui.date][meal]=s.diary[ui.date][meal].filter(e=>e.id!==id);});break;
+  case'meal-save':ui.modal={type:'meal-save',meal};render();break;
+  case'saved-apply-open':ui.modal={type:'saved-apply',meal};render();break;
+  case'saved-editor':ui.modal={type:'saved-editor',id};render();break;
+  case'saved-delete':if(confirm('¿Eliminar esta comida guardada?'))persist(s=>{s.savedMeals=s.savedMeals.filter(m=>m.id!==id);});break;
+  case'saved-duplicate':persist(s=>{const m=s.savedMeals.find(x=>x.id===id);if(!m)throw Error('Comida no encontrada.');const copy=createSavedMeal(m.name+' (copia)',m.items);s.savedMeals.push(copy);});break;
+  case'saved-item-add':ui.modal={type:'entry',savedId:b.dataset.saved,foodId:null};render();break;
+  case'saved-item-edit':ui.modal={type:'entry',savedId:b.dataset.saved,id};render();break;
+  case'saved-item-delete':if(confirm('¿Quitar este ingrediente de la plantilla?')){persist(s=>{const m=s.savedMeals.find(m=>m.id===b.dataset.saved);if(m.items.length<=1)throw Error('Debe quedar al menos un ingrediente.');m.items=m.items.filter(e=>e.id!==id);});ui.modal={type:'saved-editor',id:b.dataset.saved};render();}break;
+  case'food-open':ui.modal={type:'food',id:id||null};render();break;
+  case'food-details':ui.modal={type:'food-details',id};render();break;
+  case'food-fav':toggleFavourite('foods',id);break;
+  case'food-delete':if(confirm('¿Eliminar este alimento personalizado? Los registros antiguos conservarán su copia.')){persist(s=>{s.customFoods=s.customFoods.filter(f=>f.id!==id);s.favourites.foods=s.favourites.foods.filter(x=>x!==id);});ui.modal=null;render();}break;
+  case'recipe-edit':openRecipeEditor(id);break;
+  case'recipe-open':ui.modal={type:'recipe-details',id};render();break;
+  case'recipe-fav':toggleFavourite('recipes',id);break;
+  case'recipe-delete':if(confirm('¿Eliminar esta receta propia?')){persist(s=>{s.customRecipes=s.customRecipes.filter(r=>r.id!==id);s.favourites.recipes=s.favourites.recipes.filter(x=>x!==id);});ui.modal=null;render();}break;
+  case'recipe-ingredient-add':{
+    syncRecipeDraft();const f=foodForRecipeId($('#r-food').value),q=$('#r-quantity').value,unit=$('#r-unit').value;const e=createEntry(f,q,unit);ui.recipeDraft.ingredients.push(e);ui.recipeDraft.selectedFood=f.id;render();break;
   }
+  case'recipe-ingredient-delete':syncRecipeDraft();ui.recipeDraft.ingredients.splice(Number(b.dataset.index),1);render();break;
+  case'recipe-to-diary':{const r=findRecipe(id),target=$('#recipe-diary-meal')?.value||'desayuno';if(!r)throw Error('No se encuentra la receta.');addRecipeDiary(r,target);ui.modal=null;render();break;}
+  case'workout-edit':{const w=state.workouts.find(x=>x.id===id);if(!w)break;const f=$('#workout-form');for(const [key,value] of Object.entries(w))if(f.elements.namedItem(key))f.elements.namedItem(key).value=value;f.scrollIntoView({behavior:'smooth'});break;}
+  case'workout-delete':if(confirm('¿Eliminar este entrenamiento?'))persist(s=>{s.workouts=s.workouts.filter(w=>w.id!==id);});break;
+  case'weight-delete':if(confirm('¿Eliminar esta medición de peso?'))persist(s=>{s.weightLog=s.weightLog.filter(w=>w.date!==b.dataset.date);});break;
+  case'steps-delete':if(confirm('¿Eliminar los pasos de esta fecha?'))persist(s=>{s.stepsLog=s.stepsLog.filter(w=>w.date!==b.dataset.date);});break;
+  case'export':{const blob=backupBlob(state),link=document.createElement('a'),url=URL.createObjectURL(blob);link.href=url;link.download=`NutriIA-copia-${todayISO()}.json`;link.click();setTimeout(()=>URL.revokeObjectURL(url),2500);notify('Se ha preparado la exportación. Conserva el archivo en un lugar privado.');break;}
+  case'import-open':ui.modal={type:'import'};render();break;
+  case'wipe':if(confirm('¿Seguro que quieres eliminar TODOS los datos locales de NutriIA?')&&confirm('Última confirmación. ¿Has descargado una copia si la necesitas?')){wipeState();storageProblem='';state=createState();ui.modal=null;notify('Se han borrado los datos locales de NutriIA.');}break;
+  case'analysis-add':{const idx=Number(b.dataset.index),a=ui.analysis[idx];if(!a)throw Error('Análisis no disponible.');persist(s=>{const entry=createEntry(a.food,a.quantity,a.unit);const arr=ensureDay(s,ui.date)['desayuno'];if(duplicateEntryFound(arr,entry)&&!confirm('Ya hay un registro idéntico. ¿Añadir otro?'))throw Error('Operación cancelada.');arr.push(entry);},'Alimento analizado añadido al desayuno.');break;}
+  default:break;
+ }});
 }
-
-function mealItems(meal) {
-  return state.diary[date]?.[meal] || [];
-}
-
-function allItems() {
-  return MEALS.flatMap(meal => mealItems(meal));
-}
-
-function metrics(items) {
-  const v = items.length ? sumNutrition(items).values : {};
-  return `<div class="stats">
-    <div class="stat"><small>Calorías</small><strong>${fmt(v.kcal ?? (items.length ? null : 0),'kcal')}</strong></div>
-    <div class="stat"><small>Proteínas</small><strong>${fmt(v.protein ?? (items.length ? null : 0),'g')}</strong></div>
-    <div class="stat"><small>Carbohidratos</small><strong>${fmt(v.carbs ?? (items.length ? null : 0),'g')}</strong></div>
-    <div class="stat"><small>Grasas</small><strong>${fmt(v.fat ?? (items.length ? null : 0),'g')}</strong></div>
-  </div>`;
-}
-
-function mealOptions() {
-  return MEALS.map(m => `<option value="${m}">${m[0].toUpperCase()+m.slice(1)}</option>`).join('');
-}
-
-function foodOptions() {
-  return foods().map(f =>
-    `<option value="${h(f.id)}">${h(f.name)}</option>`
-  ).join('');
-}
-
-function diario() {
-  return `
-    <div class="card green">
-      <h1>Mi diario de alimentación</h1>
-      <p>Registra tus comidas a tu ritmo, sin restricciones obligatorias.</p>
-      <label for="dia">Seleccionar fecha</label>
-      <input id="dia" type="date" value="${date}">
-    </div>
-    <div class="card"><h2>Resumen del día</h2>${metrics(allItems())}</div>
-    <div class="card">
-      <h2>Añadir alimento</h2>
-      <form data-form="add">
-        <div class="field"><label>Comida</label>
-          <select name="meal">${mealOptions()}</select>
-        </div>
-        <div class="field"><label>Alimento</label>
-          <select name="food">${foodOptions()}</select>
-        </div>
-        <div class="grid">
-          <div class="field"><label>Cantidad</label>
-            <input name="quantity" type="number" min="0.01"
-              step="any" value="100" required>
-          </div>
-          <div class="field"><label>Unidad</label>
-            <select name="unit">
-              <option value="g">Gramos</option>
-              <option value="kg">Kilogramos</option>
-              <option value="ml">Mililitros</option>
-              <option value="l">Litros</option>
-              <option value="unidad">Unidades</option>
-            </select>
-          </div>
-        </div>
-        <button class="btn" type="submit">Añadir al diario</button>
-      </form>
-    </div>
-    ${MEALS.map(m => `
-      <div class="card">
-        <div class="row between">
-          <h2>${m[0].toUpperCase()+m.slice(1)}</h2>
-          <button class="btn secondary small" data-do="saveMeal" data-meal="${m}">
-            Guardar comida
-          </button>
-        </div>
-        ${metrics(mealItems(m))}
-        ${mealItems(m).length ? mealItems(m).map(item => `
-          <div class="item row between">
-            <div><strong>${h(item.food.name)}</strong>
-              <div class="muted">${fmt(item.quantity)} ${h(item.unit)} ·
-              ${fmt(nutritionFor(item.food,item.quantity,item.unit).kcal,'kcal')}</div>
-            </div>
-            <div class="actions">
-              <button class="btn secondary small" data-do="edit" data-meal="${m}" data-id="${h(item.id)}">Editar</button>
-              <button class="btn danger small" data-do="remove" data-meal="${m}" data-id="${h(item.id)}">Eliminar</button>
-            </div>
-          </div>`).join('') : '<p class="muted">Sin alimentos registrados.</p>'}
-      </div>`).join('')}
-    <div class="card">
-      <h2>Comidas guardadas</h2>
-      ${state.savedMeals.length ? state.savedMeals.map(s => `
-        <div class="item row between">
-          <div><strong>${h(s.name)}</strong>
-            <div class="muted">${s.items.length} alimentos</div>
-          </div>
-          <div class="actions">
-            <button class="btn secondary small" data-do="repeat" data-id="${h(s.id)}">Reutilizar</button>
-            <button class="btn danger small" data-do="deleteMeal" data-id="${h(s.id)}">Eliminar</button>
-          </div>
-        </div>`).join('') : '<p class="muted">Todavía no hay comidas guardadas.</p>'}
-    </div>`;
-}
-
-function alimentos() {
-  return `<div class="card">
-    <h1>Buscar alimentos</h1>
-    <p>Base inicial de ejemplo. Los valores son orientativos, no verificados.</p>
-    <input id="search" type="search" placeholder="Buscar por nombre...">
-  </div>
-  <div class="card">
-    <h2>Crear alimento personalizado</h2>
-    <form data-form="food">
-      <div class="field"><label>Nombre</label>
-        <input name="name" required maxlength="100"></div>
-      <div class="grid">
-        <div class="field"><label>Unidad base</label>
-          <select name="base">
-            <option value="g">Gramos</option>
-            <option value="ml">Mililitros</option>
-            <option value="unidad">Unidad</option>
-          </select></div>
-        <div class="field"><label>Valores por cantidad</label>
-          <input name="per" type="number" min="0.01" step="any" value="100" required>
-        </div>
-      </div>
-      <div class="grid">
-        ${[['kcal','Calorías (kcal)'],['protein','Proteínas (g)'],
-          ['carbs','Carbohidratos (g)'],['fat','Grasas (g)'],
-          ['sugar','Azúcares (g)'],['fiber','Fibra (g)']].map(([k,l]) =>
-          `<div class="field"><label>${l}</label>
-          <input name="${k}" type="number" min="0" step="any"
-           placeholder="Desconocido"></div>`
-        ).join('')}
-      </div>
-      <button class="btn">Guardar alimento</button>
-    </form>
-  </div>
-  <div class="card">
-    <h2>Alimentos disponibles</h2>
-    ${foods().map(f => `
-      <div class="item" data-food-item="${h(f.name.toLowerCase())}">
-        <div class="row between">
-          <strong>${h(f.name)}</strong>
-          <span class="badge">${f.source === 'ejemplo' ? 'Ejemplo' : 'Personalizado'}</span>
-        </div>
-        <p class="muted">Por ${fmt(f.per)} ${h(f.baseUnit)}:
-          ${fmt(f.nutrition.kcal,'kcal')} ·
-          P ${fmt(f.nutrition.protein,'g')} ·
-          HC ${fmt(f.nutrition.carbs,'g')} ·
-          G ${fmt(f.nutrition.fat,'g')} ·
-          Azúcares ${fmt(f.nutrition.sugar,'g')}</p>
-        <div class="actions">
-          <button class="btn secondary small" data-do="fav" data-id="${h(f.id)}">
-            ${state.foodFavorites.includes(f.id) ? 'Quitar favorito' : '☆ Favorito'}
-          </button>
-          ${f.source === 'usuario' ?
-            `<button class="btn danger small" data-do="deleteFood" data-id="${h(f.id)}">Eliminar</button>` : ''}
-        </div>
-      </div>`).join('')}
-  </div>`;
-}
-
-function recetas() {
-  return `<div class="card green">
-    <h1>Recetas rápidas y económicas</h1>
-    <p>Ideas orientativas con ingredientes y cantidades.</p>
-  </div>
-  ${recipes().map(r => {
-    const result = sumNutrition(r.ingredients).values;
-    return `<div class="card">
-      <div class="row between"><h2>${h(r.title)}</h2>
-        <span class="badge">${r.minutes} minutos</span></div>
-      <p class="muted">${r.servings} raciones ·
-        ${fmt(result.kcal == null ? null : result.kcal/r.servings,'kcal por ración')}</p>
-      <h3>Ingredientes</h3>
-      ${r.ingredients.map(i => `<div class="item">
-        ${h(i.food.name)} — ${fmt(i.quantity)} ${h(i.unit)}
-      </div>`).join('')}
-      <h3 style="margin-top:15px">Preparación</h3>
-      <p style="white-space:pre-line">${h(r.steps)}</p>
-      <div class="actions">
-        <button class="btn" data-do="recipe" data-id="${h(r.id)}">Añadir al diario</button>
-        <button class="btn secondary" data-do="recipeFav" data-id="${h(r.id)}">
-          ${state.recipeFavorites.includes(r.id) ? '★ Favorita' : '☆ Guardar favorita'}
-        </button>
-      </div>
-    </div>`;
-  }).join('')}`;
-}
-
-function actividad() {
-  return `<div class="card green">
-    <h1>Mi actividad y progreso</h1>
-    <p>Registra pasos, entrenamientos y peso. El conteo de pasos es manual por ahora.</p>
-  </div>
-  <div class="grid">
-    <div class="card">
-      <h2>Pasos diarios</h2>
-      <form data-form="steps">
-        <label>Fecha</label><input type="date" name="date" value="${date}" required>
-        <label>Pasos</label><input type="number" name="steps" min="0" step="1" required>
-        <button class="btn" style="margin-top:12px">Guardar pasos</button>
-      </form>
-    </div>
-    <div class="card">
-      <h2>Registro de peso</h2>
-      <form data-form="weight">
-        <label>Fecha</label><input type="date" name="date" value="${date}" required>
-        <label>Peso (kg)</label><input type="number" name="weight" min="1" max="600" step="0.1" required>
-        <button class="btn" style="margin-top:12px">Guardar peso</button>
-      </form>
-    </div>
-  </div>
-  <div class="card">
-    <h2>Entrenamientos</h2>
-    <form data-form="workout">
-      <div class="grid">
-        <div class="field"><label>Actividad</label>
-          <input name="name" required maxlength="100" placeholder="Ej.: caminar, gimnasio"></div>
-        <div class="field"><label>Duración (minutos)</label>
-          <input name="minutes" type="number" min="1" max="1440" required></div>
-      </div>
-      <button class="btn">Guardar entrenamiento</button>
-    </form>
-    ${state.workouts.map(w => `<div class="item row between">
-      <span>${h(w.date)} · ${h(w.name)} · ${fmt(w.minutes)} min</span>
-      <button class="btn danger small" data-do="removeWorkout" data-id="${h(w.id)}">Eliminar</button>
-    </div>`).join('')}
-  </div>
-  <div class="grid">
-    <div class="card"><h2>Historial de pasos</h2>
-      ${state.stepsLog.map(x => `<div class="item">${h(x.date)} · ${fmt(x.steps)} pasos</div>`).join('') || '<p class="muted">Sin registros.</p>'}
-    </div>
-    <div class="card"><h2>Historial de peso</h2>
-      ${state.weightLog.map(x => `<div class="item">${h(x.date)} · ${fmt(x.weight)} kg</div>`).join('') || '<p class="muted">Sin registros.</p>'}
-    </div>
-  </div>`;
-}
-
-function perfil() {
-  const p = state.profile;
-  const energy = estimateEnergy(p);
-  const goalFactor = p.objective === 'perder' ? .9 : p.objective === 'ganar' ? 1.1 : 1;
-  const target = energy ? Math.round(energy.maintenance*goalFactor) : null;
-  let macro = null;
-  try {
-    if(target) macro=calculateMacros(target,{
-      protein:p.proteinPercent,carbs:p.carbsPercent,fat:p.fatPercent
-    });
-  } catch(e) {}
-
-  return `<div class="card green">
-    <h1>Mi perfil y objetivos</h1>
-    <p>Las necesidades nutricionales son estimaciones, no límites obligatorios.</p>
-    ${energy ? `<h2>Mantenimiento estimado: ${energy.maintenance} kcal/día</h2>
-      <p>Referencia orientativa según tu objetivo: ${target} kcal/día.</p>
-      ${macro ? `<p>Proteínas: ${macro.protein} g ·
-        Carbohidratos: ${macro.carbs} g · Grasas: ${macro.fat} g</p>` : ''}` :
-      '<p>Completa los datos para obtener una estimación para adultos.</p>'}
-  </div>
-  <div class="card">
-    <form data-form="profile">
-      <div class="grid">
-        ${[['name','Nombre','text'],['age','Edad','number'],
-          ['weight','Peso (kg)','number'],['height','Altura (cm)','number']].map(([key,label,type]) =>
-          `<div class="field"><label>${label}</label>
-            <input name="${key}" type="${type}" value="${h(p[key] ?? '')}"
-             ${type==='number' ? 'min="1" step="any"' : 'maxlength="100"'}></div>`
-        ).join('')}
-        <div class="field"><label>Sexo usado para la estimación</label>
-          <select name="sex">
-            ${[['','Prefiero no indicarlo'],['hombre','Hombre'],['mujer','Mujer']].map(([v,l]) =>
-              `<option value="${v}" ${p.sex===v?'selected':''}>${l}</option>`).join('')}
-          </select>
-        </div>
-        <div class="field"><label>Actividad habitual</label>
-          <select name="activity">
-            ${[['sedentario','Sedentario'],['ligero','Ligeramente activo'],
-              ['medio','Actividad media'],['muy_activo','Muy activo']].map(([v,l]) =>
-              `<option value="${v}" ${p.activity===v?'selected':''}>${l}</option>`).join('')}
-          </select>
-        </div>
-        <div class="field"><label>Mi objetivo</label>
-          <select name="objective">
-            ${[['mantener','Mantener peso'],['perder','Reducir peso'],
-              ['ganar','Ganar peso o masa muscular']].map(([v,l]) =>
-              `<option value="${v}" ${p.objective===v?'selected':''}>${l}</option>`).join('')}
-          </select>
-        </div>
-      </div>
-      <h3>Reparto de macronutrientes (%)</h3>
-      <div class="grid three">
-        ${[['proteinPercent','Proteínas'],['carbsPercent','Carbohidratos'],['fatPercent','Grasas']].map(([k,l]) =>
-          `<div class="field"><label>${l}</label>
-            <input type="number" min="0" max="100" step="1" name="${k}" value="${p[k]}" required>
-          </div>`).join('')}
-      </div>
-      <button class="btn">Guardar perfil</button>
-    </form>
-    <p class="muted" style="margin-top:15px">Las referencias de reducción o aumento del 10% solo se muestran para adultos. No sustituyen el asesoramiento profesional.</p>
-  </div>`;
-}
-
-function datos() {
-  return `<div class="card">
-    <h1>Mis datos y privacidad</h1>
-    <p>NutriIA guarda la información localmente en este navegador.</p>
-    <p>No hay cuentas ni sincronización entre dispositivos en esta versión.</p>
-    <div class="actions">
-      <button class="btn" data-do="export">Exportar mis datos</button>
-      <button class="btn danger" data-do="wipe">Borrar mis datos</button>
-    </div>
-  </div>
-  <div class="card">
-    <h2>Aprende sobre nutrición</h2>
-    <p>Las proteínas ayudan al mantenimiento de los tejidos. Los carbohidratos aportan energía y las grasas desempeñan funciones esenciales.</p>
-    <p>Vitaminas y minerales son micronutrientes importantes. Si un alimento no incluye un valor, lo mostramos como desconocido.</p>
-    <p>Una alimentación variada y flexible no necesita clasificar los alimentos como buenos o malos.</p>
-  </div>`;
-}
-
-function render() {
-  if (loadError) {
-    app.innerHTML = `<main class="container"><div class="card error">
-      <h2>No se han podido leer los datos guardados</h2>
-      <p>${h(loadError)}</p>
-      <p>No se borrarán ni sobrescribirán automáticamente.</p>
-    </div></main>`;
-    return;
+async function handleSubmit(event){const form=event.target;if(!(form instanceof HTMLFormElement))return;event.preventDefault();const d=new FormData(form);const val=k=>String(d.get(k)??'').trim();
+ try{switch(form.getAttribute('id')){
+  case'food-search-form':ui.foodSearch=val('q').slice(0,140);render();break;
+  case'recipe-search-form':ui.recipeSearch=val('q').slice(0,140);render();break;
+  case'entry-form':{
+    const m=ui.modal;const previous=m.id?(m.savedId?state.savedMeals.find(x=>x.id===m.savedId)?.items:dayMeals(state,ui.date)[m.meal])?.find(e=>e.id===m.id):null;const food=findFood(val('foodId'))||(previous?.food.id===val('foodId')?previous.food:null);if(!food)throw Error('Elige un alimento válido.');const q=parseNumber(val('quantity'));if(q===null)throw Error('Cantidad inválida.');const unit=val('unit');const entry=createEntry(food,q,unit);const target=m.savedId?'saved':'diary';const dst=m.savedId?state.savedMeals.find(x=>x.id===m.savedId)?.items:(dayMeals(state,ui.date)[val('meal')]);
+    if(!dst)throw Error('Destino no encontrado.');if(!m.id&&duplicateEntryFound(dst,entry)&&!confirm('Ya existe este alimento con idéntica cantidad. ¿Quieres repetirlo?'))return;
+    if(persist(s=>{const arr=m.savedId?s.savedMeals.find(x=>x.id===m.savedId).items:ensureDay(s,ui.date)[val('meal')];if(m.id){let idx=arr.findIndex(e=>e.id===m.id);if(idx<0&&!m.savedId){const original=ensureDay(s,ui.date)[m.meal];idx=original.findIndex(e=>e.id===m.id);if(idx<0)throw Error('Entrada no encontrada.');original.splice(idx,1);arr.push({...entry,id:m.id});}else{if(idx<0)throw Error('Entrada no encontrada.');entry.id=m.id;arr[idx]=entry;}}else arr.push(entry);},'Alimento guardado correctamente.')){ui.modal=target==='saved'?{type:'saved-editor',id:m.savedId}:null;render();}
+    break;
   }
-
-  const screens = {
-    Diario:diario, Alimentos:alimentos, Recetas:recetas,
-    Actividad:actividad, Perfil:perfil, Datos:datos
-  };
-
-  app.innerHTML = `
-    <header class="app-header"><div class="header-inner">
-      <div><div class="brand">🌿 NutriIA</div>
-      <div class="subtitle">Tu nutrición, a tu ritmo</div></div>
-      <span class="badge">Versión local gratuita</span>
-    </div></header>
-    <nav class="tabs" aria-label="Navegación principal">
-      ${tabs.map(t => `<button data-tab="${t}" class="tab ${tab===t?'active':''}">${t}</button>`).join('')}
-    </nav>
-    <main class="container">${screens[tab]()}</main>`;
+  case'food-form':{
+    const oldId=ui.modal.id,name=val('name').slice(0,140),baseUnit=val('baseUnit'),source=val('type');if(!name||!['g','ml','unidad','racion'].includes(baseUnit))throw Error('Nombre o unidad inválidos.');
+    const n={};for(const k of KEYS){const raw=val('nut-'+k);const v=raw===''?null:parseNumber(raw,{allowZero:true});if(raw!==''&&v===null)throw Error(`Valor inválido en ${LABELS[k]}.`);n[k]=v;}
+    const obj={id:oldId||uid(),name,baseUnit,per:['g','ml'].includes(baseUnit)?100:1,source:source==='marca'?'marca':'usuario',sourceNote:val('sourceNote').slice(0,240),nutrition:n};if(!validateFood(obj))throw Error('Revisa los datos nutricionales.');
+    if(persist(s=>{const collision=[...SAMPLE_FOODS,...s.customFoods].find(f=>f.id!==oldId&&f.name.toLocaleLowerCase('es')===name.toLocaleLowerCase('es'));if(collision)throw Error('Ya existe un alimento con ese nombre. Usa uno diferente.');if(oldId){const i=s.customFoods.findIndex(f=>f.id===oldId);if(i<0)throw Error('Alimento no encontrado.');s.customFoods[i]=obj;}else s.customFoods.push(obj);},'Alimento personalizado guardado.')){ui.modal=null;render();}break;
+  }
+  case'recipe-form':{
+    const dft=ui.recipeDraft;syncRecipeDraft();const title=val('title'),minutes=parseNumber(val('minutes'),{max:1440}),servings=parseNumber(val('servings'),{max:100}),steps=val('steps');
+    if(!title||title.length>140||!steps||steps.length>4000||minutes===null||servings===null||!Number.isInteger(minutes)||!Number.isInteger(servings)||!dft.ingredients.length)throw Error('Completa el título, tiempo, raciones, pasos y al menos un ingrediente.');
+    const recipe={id:dft.id||uid(),title,minutes,servings,steps,ingredients:dft.ingredients.map(x=>structuredClone(x)),source:'usuario',tags:['Propia']};
+    if(persist(s=>{if(s.customRecipes.some(x=>x.id!==dft.id&&x.title.toLocaleLowerCase('es')===title.toLocaleLowerCase('es')))throw Error('Ya tienes una receta con este nombre.');if(dft.id){const i=s.customRecipes.findIndex(r=>r.id===dft.id);if(i<0)throw Error('Receta no encontrada.');s.customRecipes[i]=recipe;}else s.customRecipes.push(recipe);},'Receta guardada.')){ui.modal=null;ui.recipeDraft=null;render();}break;
+  }
+  case'meal-save-form':{
+    const meal=ui.modal.meal,entries=dayMeals(state,ui.date)[meal],name=val('name').slice(0,140);if(!name||!entries.length)throw Error('La comida está vacía o no tiene nombre.');
+    if(persist(s=>{if(s.savedMeals.some(x=>x.name.toLocaleLowerCase('es')===name.toLocaleLowerCase('es')))throw Error('Ya hay una comida guardada con ese nombre.');s.savedMeals.push(createSavedMeal(name,entries));},'Comida completa guardada.')){ui.modal=null;render();}break;
+  }
+  case'saved-name-form':{
+    const id=ui.modal.id,name=val('name');if(!name||name.length>140)throw Error('Nombre no válido.');persist(s=>{if(s.savedMeals.some(x=>x.id!==id&&x.name.toLocaleLowerCase('es')===name.toLocaleLowerCase('es')))throw Error('Ya hay otra comida con ese nombre.');s.savedMeals.find(m=>m.id===id).name=name;},'Nombre actualizado.');break;
+  }
+  case'saved-apply-form':{
+    const template=state.savedMeals.find(x=>x.id===val('savedId')),meal=val('meal');if(!template)throw Error('Comida guardada no encontrada.');
+    const existing=dayMeals(state,ui.date)[meal]||[];if(template.items.some(e=>duplicateEntryFound(existing,e))&&!confirm('Algunos ingredientes idénticos ya están en esta comida. ¿Quieres repetirlos?'))return;
+    if(persist(s=>applySavedMeal(s,template,ui.date,meal),'Comida reutilizada sin alterar la plantilla.')){ui.modal=null;render();}break;
+  }
+  case'profile-form':{
+    const age=parseNumber(val('age'),{max:120}),weight=parseNumber(val('weight'),{max:500}),height=parseNumber(val('height'),{max:250});
+    if(age===null||!Number.isInteger(age)||weight===null||height===null||height<80||!['male','female',''].includes(val('sex'))||!['1.2','1.375','1.55','1.725'].includes(val('activity'))||!['mantener','perder','ganar'].includes(val('goal')))throw Error('Revisa el perfil: valores no válidos.');
+    const macroProtein=parseNumber(val('macroProtein'),{allowZero:true,max:100}),macroCarbs=parseNumber(val('macroCarbs'),{allowZero:true,max:100}),macroFat=parseNumber(val('macroFat'),{allowZero:true,max:100});if([macroProtein,macroCarbs,macroFat].some(x=>x===null||!Number.isInteger(x))||macroProtein+macroCarbs+macroFat!==100)throw Error('Los porcentajes de proteínas, carbohidratos y grasas deben ser enteros y sumar 100 %.');persist(s=>{s.profile={name:val('name').slice(0,80),age:String(age),weight:String(weight),height:String(height),sex:val('sex'),activity:val('activity'),goal:val('goal'),macroProtein,macroCarbs,macroFat};},'Perfil y objetivo actualizados.');break;
+  }
+  case'steps-form':{
+    const date=safeDate(val('date')),raw=val('steps'),steps=parseNumber(raw,{allowZero:true,max:200000});if(steps===null||!Number.isInteger(steps))throw Error('Introduce pasos enteros entre 0 y 200.000.');
+    persist(s=>{s.stepsLog=s.stepsLog.filter(x=>x.date!==date);s.stepsLog.push({date,steps});},'Pasos guardados.');break;
+  }
+  case'weight-form':{
+    const date=safeDate(val('date')),weight=parseNumber(val('weight'),{max:500});if(weight===null)throw Error('Peso no válido.');
+    persist(s=>{s.weightLog=s.weightLog.filter(x=>x.date!==date);s.weightLog.push({date,weight});},'Peso registrado.');break;
+  }
+  case'workout-form':{
+    const date=safeDate(val('date')),type=val('type'),minutes=parseNumber(val('minutes'),{max:1440}),note=val('note');if(!type||type.length>140||!Number.isInteger(minutes)||minutes===null||note.length>2000)throw Error('Revisa el entrenamiento.');
+    persist(s=>{const workout={id:val('id')||uid(),date,type,minutes,note};const idx=s.workouts.findIndex(x=>x.id===workout.id);if(idx>=0)s.workouts[idx]=workout;else s.workouts.push(workout);},'Entrenamiento guardado.');break;
+  }
+  case'import-form':{
+    const file=d.get('file');if(!(file instanceof File)||file.size>10_000_000)throw Error('Selecciona un archivo JSON de hasta 10 MB.');const candidate=migrate(JSON.parse(await file.text()));if(!confirm('¿Quieres sustituir los datos de este navegador por los del archivo?'))return;
+    writeState(candidate);storageProblem='';state=candidate;ui.modal=null;ui.page='inicio';notify('Copia de seguridad importada correctamente.');break;
+  }
+  case'analysis-form':{
+    const result=analyzeText(val('description'),foods());ui.analysis=result.items;ui.analysisUnknown=result.unknown;render();break;
+  }
+  default:break;
+ }}catch(e){notify(e.message||'Ha ocurrido un error.',true);}
 }
-
-app.addEventListener('click', event => {
-  const b = event.target.closest('button');
-  if (!b) return;
-
-  if (b.dataset.tab) {
-    tab = b.dataset.tab;
-    render();
-    return;
+function handleChange(event){const t=event.target;
+ switch(t.id){
+  case'selected-day':try{ui.date=safeDate(t.value);render();}catch(e){notify(e.message,true);}break;
+  case'food-filter':ui.foodFilter=t.value;render();break;
+  case'recipe-filter':ui.recipeFilter=t.value;render();break;
+  case'entry-food':{
+    if(!ui.modal)return;ui.modal.foodId=t.value;ui.modal.unit=allowedUnits(findFood(t.value))[0];ui.modal.qty=$('#entry-quantity')?.value;render();break;
   }
-
-  const action = b.dataset.do;
-  const id = b.dataset.id;
-
-  if (!action) return;
-
-  try {
-    if (action === 'edit') {
-      const item = mealItems(b.dataset.meal).find(i=>i.id===id);
-      if(!item) return;
-      const text=prompt('Nueva cantidad:',item.quantity);
-      if(text===null) return;
-      const quantity=Number(text);
-      nutritionFor(item.food,quantity,item.unit);
-      save(()=>{item.quantity=quantity;});
-    }
-
-    if(action==='remove' && confirm('¿Eliminar alimento del diario?'))
-      save(()=>{state.diary[date][b.dataset.meal]=mealItems(b.dataset.meal).filter(i=>i.id!==id);});
-
-    if(action==='fav') save(()=>{
-      state.foodFavorites=state.foodFavorites.includes(id)
-        ? state.foodFavorites.filter(x=>x!==id)
-        : [...state.foodFavorites,id];
-    });
-
-    if(action==='deleteFood' && confirm('¿Eliminar este alimento personalizado?'))
-      save(()=>{state.customFoods=state.customFoods.filter(f=>f.id!==id);});
-
-    if(action==='saveMeal') {
-      const items=mealItems(b.dataset.meal);
-      if(!items.length) return alert('Esta comida no tiene alimentos.');
-      const name=prompt('Nombre para guardar la comida:');
-      if(!name?.trim()) return;
-      save(()=>state.savedMeals.push({
-        id:uid(),name:name.trim(),items:clone(items)
-      }));
-    }
-
-    if(action==='repeat') {
-      const meal=state.savedMeals.find(s=>s.id===id);
-      const target=prompt('¿En qué comida? desayuno, comida, merienda o cena','comida')?.toLowerCase();
-      if(!meal || !MEALS.includes(target)) return;
-      save(()=>{
-        state.diary[date] ||= {};
-        state.diary[date][target] ||= [];
-        state.diary[date][target].push(...clone(meal.items).map(x=>({...x,id:uid()})));
-      });
-    }
-
-    if(action==='deleteMeal' && confirm('¿Eliminar comida guardada?'))
-      save(()=>{state.savedMeals=state.savedMeals.filter(s=>s.id!==id);});
-
-    if(action==='recipeFav') save(()=>{
-      state.recipeFavorites=state.recipeFavorites.includes(id)
-        ? state.recipeFavorites.filter(x=>x!==id)
-        : [...state.recipeFavorites,id];
-    });
-
-    if(action==='recipe') {
-      const recipe=recipes().find(r=>r.id===id);
-      if(!recipe) return;
-      const meal=prompt('¿En qué comida? desayuno, comida, merienda o cena','comida')?.toLowerCase();
-      if(!MEALS.includes(meal)) return;
-      const portion=Number(prompt('Número de raciones que has comido:',1));
-      if(!Number.isFinite(portion)||portion<=0) return alert('Cantidad inválida.');
-
-      const total=sumNutrition(recipe.ingredients).values;
-      const nutrition=Object.fromEntries(KEYS.map(k=>
-        [k,total[k]===null?null:total[k]/recipe.servings]
-      ));
-      save(()=>{
-        state.diary[date] ||= {};
-        state.diary[date][meal] ||= [];
-        state.diary[date][meal].push({
-          id:uid(),quantity:portion,unit:'unidad',
-          food:{id:'recipe-'+uid(),name:recipe.title,
-            baseUnit:'unidad',per:1,source:'receta',nutrition}
-        });
-      });
-    }
-
-    if(action==='removeWorkout' && confirm('¿Eliminar entrenamiento?'))
-      save(()=>{state.workouts=state.workouts.filter(w=>w.id!==id);});
-
-    if(action==='export') {
-      const url=URL.createObjectURL(backupBlob(state));
-      const link=document.createElement('a');
-      link.href=url;
-      link.download=`NutriIA-copia-${date}.json`;
-      link.click();
-      setTimeout(()=>URL.revokeObjectURL(url),1000);
-    }
-
-    if(action==='wipe' &&
-       confirm('¿Borrar todos tus datos de este navegador?') &&
-       confirm('Esta acción no se puede deshacer. ¿Continuar?')) {
-      wipeState();
-      state=createState();
-      render();
-    }
-  } catch(e) { alert(e.message); }
-});
-
-app.addEventListener('change',event=>{
-  if(event.target.id==='dia') {
-    date=event.target.value;
-    render();
+  case'r-food':{
+    syncRecipeDraft();ui.recipeDraft.selectedFood=t.value;render();break;
   }
-
-  if(event.target.name==='food') {
-    const f=food(event.target.value);
-    const form=event.target.closest('form');
-    if(f && form) {
-      form.elements.unit.value=f.baseUnit;
-      form.elements.quantity.value=f.baseUnit==='unidad'?1:100;
-    }
+  case'recipe-servings':{
+    const q=parseNumber(t.value,{max:100});if(q&&Number.isInteger(q)){ui.modal.count=q;render();}break;
   }
-});
-
-app.addEventListener('input',event=>{
-  if(event.target.id==='search') {
-    const q=event.target.value.trim().toLowerCase();
-    document.querySelectorAll('[data-food-item]').forEach(el=>{
-      el.hidden=!el.dataset.foodItem.includes(q);
-    });
+  case'analysis-photo':{
+    if(ui.photoURL)URL.revokeObjectURL(ui.photoURL);const file=t.files?.[0];ui.photoURL=file&&file.type.startsWith('image/')?URL.createObjectURL(file):null;render();break;
   }
-});
-
-app.addEventListener('submit',event=>{
-  const form=event.target;
-  if(!form.dataset.form) return;
-  event.preventDefault();
-
-  const v=Object.fromEntries(new FormData(form));
-  const number=(s,min=0)=> {
-    if(s==='' || !Number.isFinite(Number(s)) || Number(s)<min)
-      throw Error('Introduce un número válido.');
-    return Number(s);
-  };
-
-  try {
-    switch(form.dataset.form) {
-      case 'add': {
-        const f=food(v.food);
-        if(!f || !MEALS.includes(v.meal)) throw Error('Alimento o comida no válidos.');
-        const quantity=number(v.quantity,0.001);
-        nutritionFor(f,quantity,v.unit);
-        save(()=>{
-          state.diary[date] ||= {};
-          state.diary[date][v.meal] ||= [];
-          state.diary[date][v.meal].push({
-            id:uid(),food:clone(f),quantity,unit:v.unit
-          });
-        });
-        break;
-      }
-
-      case 'food': {
-        const name=v.name.trim();
-        if(!name) throw Error('Escribe un nombre.');
-        if(foods().some(f=>f.name.toLowerCase()===name.toLowerCase()))
-          throw Error('Ya existe un alimento con ese nombre.');
-        const nutrition=Object.fromEntries(KEYS.map(k=>
-          [k,v[k]==null || v[k]===''?null:number(v[k])]
-        ));
-        save(()=>state.customFoods.push({
-          id:uid(),name,baseUnit:v.base,per:number(v.per,0.001),
-          source:'usuario',nutrition
-        }));
-        break;
-      }
-
-      case 'steps':
-        save(()=>{
-          const record={date:v.date,steps:number(v.steps)};
-          state.stepsLog=state.stepsLog.filter(x=>x.date!==v.date);
-          state.stepsLog.push(record);
-          state.stepsLog.sort((a,b)=>b.date.localeCompare(a.date));
-        });
-        break;
-
-      case 'weight':
-        save(()=>{
-          const record={date:v.date,weight:number(v.weight,1)};
-          state.weightLog=state.weightLog.filter(x=>x.date!==v.date);
-          state.weightLog.push(record);
-          state.weightLog.sort((a,b)=>b.date.localeCompare(a.date));
-        });
-        break;
-
-      case 'workout':
-        save(()=>state.workouts.unshift({
-          id:uid(),date, name:v.name.trim(),
-          minutes:number(v.minutes,1)
-        }));
-        break;
-
-      case 'profile': {
-        const total=number(v.proteinPercent)+number(v.carbsPercent)+number(v.fatPercent);
-        if(Math.abs(total-100)>0.01)
-          throw Error('Los porcentajes de macros deben sumar 100.');
-        save(()=>{
-          state.profile={
-            ...state.profile,
-            name:v.name.trim(),
-            age:v.age===''?null:number(v.age,1),
-            weight:v.weight===''?null:number(v.weight,1),
-            height:v.height===''?null:number(v.height,1),
-            sex:v.sex,activity:v.activity,objective:v.objective,
-            proteinPercent:number(v.proteinPercent),
-            carbsPercent:number(v.carbsPercent),
-            fatPercent:number(v.fatPercent)
-          };
-        });
-        break;
-      }
-    }
-  } catch(e) { alert(e.message); }
-});
-
+ }
+}
+function analyzeText(text,available){const items=[],unknown=[];if(text.length>5000)throw Error('Texto demasiado largo (máximo 5.000 caracteres).');
+ const normalize=s=>s.toLocaleLowerCase('es').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+ for(const raw of text.split(/[;\n]+/).map(s=>s.trim()).filter(Boolean)){
+  const match=raw.match(/^([\d.,]+)\s*(kg|g|ml|l|unidades?|raciones?)\s+(?:de\s+)?(.+)$/i);
+  if(!match){unknown.push(raw+' (formato: 150 g arroz)');continue;}
+  const amount=parseNumber(match[1]);const unit=/^unid/i.test(match[2])?'unidad':/^raci/i.test(match[2])?'racion':match[2].toLowerCase();
+  const name=normalize(match[3]);const f=available.find(x=>normalize(x.name)===name)||available.find(x=>normalize(x.name).startsWith(name))||available.find(x=>normalize(x.name).includes(name));
+  if(!f||amount===null||!allowedUnits(f).includes(unit)){unknown.push(raw+' (no reconocido o unidad incompatible)');continue;}
+  items.push({food:f,quantity:amount,unit,n:scaleNutrition(f,amount,unit)});
+ }return{items,unknown};}
+function analysisPanel(){const sum=sumNutrition(ui.analysis.map(x=>x.n));return `<section class="panel stack" style="margin-top:18px"><div><h3>✍️ Analizar una comida por escrito</h3><p class="footnote">Análisis local por coincidencia con alimentos conocidos; no es una IA conversacional. Separa cada alimento con punto y coma o salto de línea.</p></div><form id="analysis-form"><div class="field"><label for="analysis-text">Escribe alimento y cantidad</label><textarea id="analysis-text" name="description" maxlength="5000" placeholder="150 g arroz blanco cocido; 100 g pechuga de pollo cocida"></textarea></div><button class="btn" type="submit">Calcular nutrientes</button></form>${ui.analysis.length?`<div class="selection"><strong>Resultado aproximado</strong>${macroTiles(sum)}<div class="table-scroll" style="margin-top:12px"><table class="microtable"><tbody>${MICRO_KEYS.map(k=>`<tr><th>${LABELS[k]}</th><td>${totals(sum,k)}</td></tr>`).join('')}</tbody></table></div></div>${ui.analysis.map((a,i)=>`<div class="list-item"><span>${esc(a.food.name)} · ${fmt(a.quantity)} ${a.unit} · ${nutrient(a.n,'kcal')}</span>${btn('analysis-add','+ Diario','secondary',`data-index="${i}"`)}</div>`).join('')}`:''}${ui.analysisUnknown.length?`<div class="notice error">No se han podido interpretar: ${ui.analysisUnknown.map(esc).join('; ')}</div>`:''}
+ <hr class="divider"><h3>📷 Foto de tu comida</h3><p>Se puede seleccionar o tomar una fotografía, pero <strong>no hay reconocimiento automático por IA</strong> en esta versión sin servicios externos. Una fotografía no revela por sí sola los micronutrientes ni las cantidades exactas.</p><div class="field"><label for="analysis-photo">Elegir imagen (no se guarda ni se envía)</label><input id="analysis-photo" type="file" accept="image/*" capture="environment"></div>${ui.photoURL?`<img class="empty-img" src="${ui.photoURL}" alt="Vista previa de la comida seleccionada"><p class="footnote">Describe los ingredientes y cantidades en el campo de texto para obtener la estimación.</p>`:''}</section>`;}
+const origFoodsView=foodsView;
+foodsView=function(){return origFoodsView()+analysisPanel();};
+$('#app').addEventListener('click',handleClick);
+$('#app').addEventListener('submit',handleSubmit);
+$('#app').addEventListener('change',handleChange);
+window.addEventListener('keydown',e=>{if(e.key==='Escape'&&ui.modal)closeModal();});
 render();
+if(navigator.serviceWorker?.register&&location.protocol!=='file:')navigator.serviceWorker.register('./sw.js').catch(()=>{});
